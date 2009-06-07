@@ -10,14 +10,14 @@ use MIME::Base64;
 
 ######################
 
-our $VERSION = '1.0';
-our $BUF_SIZE = 1475; # how many bytes to read/transmit at a time
+our $VERSION = '1.1';
+our $BUF_SIZE = 1460; # how many bytes to read/transmit at a time
 
 ######################
 
 =head1 NAME
 
-Net::Icecast::Source - icecast streaming source
+Net::Icecast::Source - Icecast streaming source
 
 =head1 SYNOPSIS
 
@@ -33,14 +33,26 @@ Net::Icecast::Source - icecast streaming source
 			name => 'lol dongs radio fun land',
 			description => 'party time all day',
 			aim => 'lindenstacker',
-			url => 'http://shoutcast.com',
+			url => 'http://icecast.org',
 		},
 	);
 
+	# attempt to connect to the streaming server
+	$source->connect
+		or die "Unable to connect to server: $!\n";
+		
+	# attempt to log in to the specified mountpoint
+	$source->login
+		or die "Incorrect username/password\n";
+
+	# stream mp3
 	my $sample;
 	open $sample, "sample.mp3" or die $!;
 	$source->stream_fh($sample);
 	close $sample;
+	
+	# done, clean up
+	$source->disconnect
 	
 =head1 DESCRIPTION
 
@@ -66,54 +78,13 @@ sub new {
 }
 
 
-=item stream_fh($filehandle)
+=item connect
 
-Read from $filehandle until EOF, passing through the raw data to the 
-icecast server.
+Connect to the server, use this before logging in. Returns success/failure
 
 =cut
 
-sub stream_fh {
-	my ($self, $fh) = @_;
-	
-	my $sock = $self->_connect or return 0;
-	$self->{sock} = $sock;
-	
-	my $input = IO::Handle->new_from_fd($fh, "r");
-	unless ($input) {
-		warn "unable to create IO::Handle for filehandle $fh: $!\n";
-		$sock->close;
-		return 0;
-	}
-	
-	unless ($self->_login) {
-		warn "invalid password\n";
-		$sock->close;
-		return;
-	}
-	
-	my $buf;
-	while (! $input->eof) {
-		my $bytes = $input->sysread($buf, $BUF_SIZE);
-		unless ($bytes) {
-			# EOF
-			last;
-		}
-		
-		print "read = $bytes\n";
-		
-		$sock->print($buf);
-	}
-	
-	$input->close;
-	$sock->close;
-}
-
-
-#########
-
-
-sub _connect {
+sub connect {
 	my ($self) = @_;
 	
 	my $server = $self->{server} or croak "no server specified";
@@ -126,15 +97,18 @@ sub _connect {
 		Timeout  => 10,
 	);
 	
-	unless ($sock) {
-		warn "Couldn't connect to $server: $!\n";
-		return undef;
-	}
-	
+	$self->{sock} = $sock;
 	return $sock;
 }
 
-sub _login {
+
+=item login
+
+Log in to the mount point and send metadata. Returns if login was successful or not
+
+=cut
+
+sub login {
 	my ($self) = @_;
 	
 	my $password = $self->{password}
@@ -173,8 +147,67 @@ sub _login {
 		}
 	}
 	
+	$self->{logged_in} = $ok;			
 	return $ok;
 }
+
+
+=item stream_fh($filehandle)
+
+Read from $filehandle until EOF, passing through the raw data to the 
+icecast server.
+
+=cut
+
+sub stream_fh {
+	my ($self, $fh) = @_;
+	
+	my $sock = $self->{sock} or croak "Tried to stream while not connected to server";
+	croak "Tried to stream while not logged in" unless $self->{logged_in};
+	
+	my $input = IO::Handle->new_from_fd($fh, "r");
+	unless ($input) {
+		warn "unable to create IO::Handle for filehandle $fh: $!\n";
+		$sock->close;
+		return 0;
+	}
+	
+	my $buf;
+	while (! $input->eof) {
+		my $bytes = $input->sysread($buf, $BUF_SIZE);
+		unless ($bytes) {
+			# EOF
+			last;
+		}
+				
+		$sock->print($buf);
+	}
+	
+	$input->close;
+}
+
+
+=item disconnect
+
+Closes all sockets and disconnects
+
+=cut
+
+sub disconnect {
+	my ($self) = @_;
+	
+	$self->{connected} = 0;
+	$self->{logged_in} = 0;
+	
+	my $sock = $self->{sock} or return;
+	
+	$sock->shutdown(2); # done w socket
+	$sock->close;
+	delete $self->{sock};
+}
+
+#########
+
 
 sub _metadata_headers {
 	my $self = shift;
@@ -191,14 +224,19 @@ sub _metadata_headers {
 
 sub _write {
 	my ($self, $data) = @_;
+	
 	my $sock = $self->{sock};
-	$sock->print($data);
+	croak "Tried to write while not connected" unless $sock;
+	
+	$sock->syswrite($data);
 }
 
 sub _read {
 	my ($self) = @_;
 	
 	my $sock = $self->{sock};
+	croak "Tried to read while not connected" unless $sock;
+
 	my $r = <$sock>;
 	return $r;
 }
